@@ -6,6 +6,8 @@ var fontOptimizer = path.normalize(__dirname + '/../vendor/font-optimizer');
 var webifyPath = path.normalize(__dirname + '/../vendor/webify');
 if (process.platform === 'win32') webifyPath += '.exe';
 
+var PERL_VERSION = 'perl-5.20.3';
+
 module.exports = function(grunt) {
 
   grunt.registerMultiTask('ziti', 'Subsetting, optimizing and converting ' +
@@ -154,9 +156,9 @@ module.exports = function(grunt) {
           ];
           if (current.src) {
             if (current.options.subset === true) {
-              tasks.push(subset);
+              tasks.push(installPerlAndSubset);
               if (current.options.optimize === true) {
-                tasks.push(obfuscate);
+                tasks.push(installPerlAndObfuscate);
                 tasks.push(renameOptimizedFile);
               }
             } else {
@@ -531,23 +533,93 @@ function hasClass(classNames, className) {
   return classNames.indexOf(className) !== -1;
 }
 
+function checkForPerl() {
+  var deferred = Q.defer();
+  var perlChecker = spawn('perlbrew', ['list']);
+  perlChecker.stdout.on('data', function (output) {
+      if (output.toString().indexOf(PERL_VERSION) >= 0) {
+        deferred.resolve(true);
+      }
+  });
+  perlChecker.on('close', function(code) {
+    if (code != 0) {
+      deferred.reject('checking for installed perl versions exited with code: ' + code);
+    } else {
+      deferred.resolve(false);
+    }
+  });
+  return deferred.promise;
+}
+
+function installPerlIfNeeded(foundPerl) {
+  if (foundPerl) {
+    return Q();
+  } else {
+    var deferred = Q.defer();
+    setTimeout(function() {
+      deferred.notify([ 'write', 'Installing ' + PERL_VERSION + '... ' ]);
+    }, 0);
+    var perlInstaller = spawn('perlbrew', [
+      'install',
+      PERL_VERSION
+    ]);
+    perlInstaller.stdout.on('data', function(data) {
+        deferred.notify([ 'write', '\n\n' + data.toString() + '\n... ' ]);
+    })
+    perlInstaller.on('close', function(code) {
+      if (code != 0) {
+        deferred.notify([ 'error' ]);
+        deferred.reject('installing ' + PERL_VERSION + ' exited with code: ' + code);
+      } else {
+        deferred.notify([ 'ok' ]);
+        deferred.resolve();
+      }
+    });
+  }
+  return deferred.promise;
+}
+
+function perl(args, options) {
+    return spawn('perlbrew', [
+        'exec',
+        '--with',
+        PERL_VERSION,
+        'perl'
+    ].concat(args), options);
+}
+
+function installPerlAndSubset(bundle) {
+  return checkForPerl()
+    .then(installPerlIfNeeded)
+    .then(function() {
+      return subset(bundle);
+    });
+}
+
 function subset(bundle) {
   var deferred = Q.defer();
   setTimeout(function() {
     deferred.notify([ 'write', 'Subsetting ' + bundle.originalSrc + '... ' ]);
   }, 0);
-  var subset = spawn('perl', [
+  var subset = perl([
     '-CA',
     'subset.pl',
-    '--charsfile=' + bundle.charsFile, bundle.src, bundle.dest
+    '--charsfile=' + bundle.charsFile,
+    bundle.src,
+    bundle.dest
   ], {
     cwd: fontOptimizer
+  });
+  subseterr = '';
+  subset.stderr.on('data', function(data) {
+    subseterr += data.toString();
   });
   subset.on('close', function(code) {
     if (code === 0) {
       deferred.notify([ 'ok' ]);
       deferred.resolve(bundle);
     } else {
+      deferred.notify([ 'write', subseterr ]);
       deferred.notify([ 'error' ]);
       deferred.reject('subset exited with code: ' + code);
     }
@@ -555,14 +627,24 @@ function subset(bundle) {
   return deferred.promise;
 }
 
+function installPerlAndObfuscate(bundle) {
+  return checkForPerl()
+    .then(installPerlIfNeeded)
+    .then(function() {
+      return obfuscate(bundle);
+    });
+}
+
 function obfuscate(bundle) {
   var deferred = Q.defer();
   setTimeout(function() {
     deferred.notify([ 'write', 'Obfuscating... ' ]);
   }, 0);
-  var obfuscate = spawn('perl', [
+  var obfuscate = perl([
     'obfuscate-font.pl',
-    '--all', bundle.dest, bundle.optimizedFile
+    '--all',
+    bundle.dest,
+    bundle.optimizedFile
   ], {
     cwd: fontOptimizer
   });
